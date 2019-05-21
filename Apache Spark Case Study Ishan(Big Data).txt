@@ -1,0 +1,533 @@
+# Load SparkR
+spark_path <- '/usr/local/spark'
+if (nchar(Sys.getenv("SPARK_HOME")) < 1) {
+  Sys.setenv(SPARK_HOME = spark_path)
+}
+library(SparkR, lib.loc = c(file.path(Sys.getenv("SPARK_HOME"), "R", "lib")))
+
+# Initialize the sparkR session
+sparkR.session(master = "yarn-client", sparkConfig = list(spark.driver.memory = "1g"))
+
+# Create a Spark DataFrame and examine structure
+tickets_2017 <- read.df("/common_folder/nyc_parking/Parking_Violations_Issued_-_Fiscal_Year_2017.csv", source = "csv",
+                        header = TRUE, inferSchema = TRUE)
+
+
+# Check the Spark Dataframe
+head(tickets_2017)
+describe(tickets_2017)
+
+### EXAMINE THE DATA
+
+# 1. Find the total number of tickets for the year.
+nrow(tickets_2017)  
+# 10803028 tickets
+
+# Before executing any hive-sql query from RStudio, you need to add a jar file in RStudio 
+sql("ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar")
+
+# For using SQL, you need to create a temporary view
+createOrReplaceTempView(tickets_2017, "data_2017")
+
+# 2. Find out the number of unique states from where the cars 
+# that got parking tickets came from. (Hint: Use 'Registration State')
+head(SparkR::sql("SELECT count(distinct `Registration State`) as count 
+                 FROM data_2017"))
+# 67 distinct values
+
+
+# Arranging the dataframe based on number of entries
+head(SparkR::sql("SELECT `Registration State`, count(*) as count 
+                    FROM data_2017 group by `Registration State` order by `count` desc"))
+
+# Registration State   count                                                    
+# 1               NY 8481061
+# 2               NJ  925965
+# 3               PA  285419
+# 4               FL  144556
+# 5               CT  141088
+# 6               MA   85547
+
+# Replacing '99' by 'NY' in all the dataframe 
+tickets_2017$`Registration State`<- ifelse(tickets_2017$`Registration State` == "99",
+                                           "NY", tickets_2017$`Registration State`)
+
+# The temporary view needs to be recreated as values have been updated in tickets_2017
+createOrReplaceTempView(tickets_2017, "data_2017")
+head(SparkR::sql("SELECT count(distinct `Registration State`) as count 
+                 FROM data_2017"))
+# 66 distinct values
+
+
+### AGGREGATION TASKS
+
+# 1. How often does each violation code occur? 
+# (frequency of violation codes - find the top 5)
+
+# Since we haven't made in changes in the dataframe or the temporary view,
+# we can use the same for analysis
+head(SparkR::sql("SELECT `Violation Code`, count(*) as count 
+                    FROM data_2017 group by `Violation Code` order by `count` desc limit 5"))
+
+## 2017
+## Violation Code   count
+## 1             21 1528588
+## 2             36 1400614
+## 3             38 1062304
+## 4             14  893498
+## 5             20  618593
+
+# 2. How often does each vehicle body type get a parking ticket?
+# How about the vehicle make? (find the top 5 for both)
+
+## Here, `Violation Code` will be replaced by the each of the following variables:
+
+## `Vehicle Body Type`
+head(SparkR::sql("SELECT `Vehicle Body Type`, count(*) as count FROM data_2017 
+                    group by `Vehicle Body Type` order by `count` desc limit 5"))
+
+## 2017
+## Vehicle Body Type   count
+## 1              SUBN 3719802
+## 2              4DSD 3082020
+## 3               VAN 1411970
+## 4              DELV  687330
+## 5               SDN  438191
+
+
+## `Vehicle Make`
+head(SparkR::sql("SELECT `Vehicle Make`, count(*) as count FROM data_2017 
+                    group by `Vehicle Make` order by `count` desc limit 5"))
+
+## 2017
+## Vehicle Make   count
+## 1         FORD 1280958
+## 2        TOYOT 1211451
+## 3        HONDA 1079238
+## 4        NISSA  918590
+## 5        CHEVR  714655
+
+
+# 3. A precinct is a police station that has a certain zone of the city under its command.
+# Find the (5 highest) frequencies of:
+
+# 3.1 Violating Precincts (this is the precinct of the zone where the violation occurred).
+# Using this, can you make any insights for parking violations in any specific areas of the city?
+
+# 3.2 Issuing Precincts (this is the precinct that issued the ticket)
+
+## Here, `Violation Code` will be replaced by 'Violation Precinct' and 'Issuer Precinct'
+head(SparkR::sql("SELECT `Violation Precinct`, count(*) as count FROM data_2017 
+                    group by `Violation Precinct` order by `count` desc limit 6"))
+
+## 2017
+##   Violation Precinct  count
+## 2                 19  535671
+## 3                 14  352450
+## 4                  1  331810
+## 5                 18  306920
+## 6                114  296514
+
+head(SparkR::sql("SELECT `Issuer Precinct`, count(*) as count FROM data_2017
+                    group by `Issuer Precinct` order by `count` desc limit 6"))
+
+## 2017
+##      Issuer Precinct count
+## 2              19  521513
+## 3              14  344977
+## 4               1  321170
+## 5              18  296553
+## 6             114  289950
+
+
+# Find the violation code frequency across 3 precincts which have issued the most
+# number of tickets - do these precinct zones have an exceptionally high frequency 
+#  of certain violation codes? Are these codes common across precincts?
+
+
+# The top 3 precincts which have issued maximum tickets are '19', '14' and '1'
+
+head(SparkR::sql("SELECT `Issuer Precinct`, `Violation Code`, count(*) as count_tickets 
+                    FROM data_2017 where `Issuer Precinct` = '19'
+                    group by `Issuer Precinct`, `Violation Code` 
+                    order by `count_tickets` desc limit 5"))
+
+head(SparkR::sql("SELECT `Issuer Precinct`, `Violation Code`, count(*) as count_tickets 
+                    FROM data_2017 where `Issuer Precinct` = '14'
+                    group by `Issuer Precinct`, `Violation Code` 
+                    order by `count_tickets` desc limit 5"))
+
+head(SparkR::sql("SELECT `Issuer Precinct`, `Violation Code`, count(*) as count_tickets 
+                    FROM data_2017 where `Issuer Precinct` = '1'
+                    group by `Issuer Precinct`, `Violation Code` 
+                    order by `count_tickets` desc limit 5"))
+
+
+## Issuer Precinct - 19
+## Violation Code count_tickets                                             
+## 1             46            86390
+## 2             37            72437
+## 3             38            72437
+## 4             14            57563
+## 5             21            54700
+
+## Issuer Precinct - 14
+## Violation Code count_tickets                                              
+## 1             14            73837
+## 2             69            58026
+## 3             31            39857
+## 4             47            30540
+## 5             42            20663
+
+## Issuer Precinct - 1
+## Violation Code count_tickets                                              
+## 1             14            73522
+## 2             16            38937
+## 3             20            27841
+## 4             46            22534
+## 5             38            16989
+
+
+## From the results obtained after the above query, you can see that the violation code '14'
+## is common in all the three precincts.
+## Your analysis
+
+## 5. You’d want to find out the properties of parking violations across different times of the day:
+
+## Check for missing values
+
+head(SparkR::sql("select count(*) as count
+                 FROM data_2017 where `Violation Time` is Null")) 
+
+# Since there are no null values, you can move forward with the analysis
+
+tickets_2017 <- dropna(tickets_2017, how = c("any", "all"), minNonNulls = NULL, 
+                       cols = 'Violation Time')
+
+nrow(tickets_2017)
+# 10803028 tickets
+
+## Changing the format
+
+# Updating the SQL view
+createOrReplaceTempView(tickets_2017, "data_2017")
+
+# Present format
+head(SparkR::sql("select `Violation Time` from data_2017 limit 5"))
+
+# Check for the operation to be performed
+head(SparkR::sql("select `Violation Time`, if(right(`Violation Time`, 1) == 'A' or left(`Violation Time`, 2) == '12',concat(substring(`Violation Time`, 1,2),
+                    ':', substring(`Violation Time`, 3,2)), concat(int(substring(`Violation Time`, 1,2) + 12),
+                    ':', substring(`Violation Time`, 3,2))) as `Violation Time 2`
+                    from data_2017 limit 50"))
+
+##    Violation Time Violation Time 2                                               
+## 1           0143A            01:43
+## 2           0400P            16:00
+## 3           0233P            14:33
+## 4           1120A            11:20
+## 5           0555P            17:55
+
+# Divide 24 hours into 6 equal discrete bins of time. 
+# The intervals you choose are at your discretion. 
+
+# Creating a separate df with the required fields for analysis
+time_violation_analysis <- SparkR::sql(
+  "select if(right(`Violation Time`, 1) == 'A' or left(`Violation Time`, 2) == '12',
+  concat(substring(`Violation Time`, 1,2),':', substring(`Violation Time`,3,2)),
+  concat(int(substring(`Violation Time`, 1,2) + 12),':', substring(`Violation Time`, 3,2)))
+  as `Violation Time`, `Violation Code` from data_2017")
+
+head(time_violation_analysis)
+
+# For using SQL, you need to create a temporary view
+createOrReplaceTempView(time_violation_analysis, 'time_violation_data')
+
+# Separating the time into 6 equal bins based on time
+# Replacing the dataframe with a new dataframe containing all the columns
+# For each of these groups, find the 3 most commonly occurring violations
+
+time_violation_analysis <- SparkR::sql("select case
+                                       when int(substring(`Violation Time`,1,2)) between 00 and 03
+                                       then '00:00-03:59'
+                                       when int(substring(`Violation Time`,1,2)) between 04 and 07
+                                       then '04:00-07:59'
+                                       when int(substring(`Violation Time`,1,2)) between 08 and 11
+                                       then '08:00-11:59'
+                                       when int(substring(`Violation Time`,1,2)) between 12 and 15
+                                       then '12:00-15:59'
+                                       when int(substring(`Violation Time`,1,2)) between 16 and 19
+                                       then '16:00-19:59'
+                                       else '20:00-23:59'
+                                       end as bins,  `Violation Time`, `Violation Code`
+                                       from time_violation_data")
+
+head(time_violation_analysis)
+
+
+##          bins Violation Time Violation Code
+## 1 00:00-03:59          01:43              7
+## 2 16:00-19:59          16:00              7
+## 3 12:00-15:59          14:33              5
+## 4 08:00-11:59          11:20             47
+## 5 16:00-19:59          17:55             69
+## 6 20:00-23:59          20:52              7
+
+# Updating the SQL view
+createOrReplaceTempView(time_violation_analysis, 'time_violation_data')
+
+
+## For each of these groups, find the 3 most commonly occurring violations
+head(SparkR::sql("SELECT bins, `Violation Code`, count(*) as `count`
+                    FROM time_violation_data where bins = '00:00-03:59'
+                    group by bins, `Violation Code`
+                    order by `count` desc limit 3"))
+
+head(SparkR::sql("SELECT bins, `Violation Code`, count(*) as `count`
+                    FROM time_violation_data where bins = '04:00-07:59'
+                    group by bins, `Violation Code`
+                    order by `count` desc limit 3"))
+
+head(SparkR::sql("SELECT bins, `Violation Code`, count(*) as `count`
+                    FROM time_violation_data where bins = '08:00-11:59'
+                    group by bins, `Violation Code`
+                    order by `count` desc limit 3"))
+
+head(SparkR::sql("SELECT bins, `Violation Code`, count(*) as `count`
+                    FROM time_violation_data where bins = '12:00-15:59'
+                    group by bins, `Violation Code`
+                    order by `count` desc limit 3"))
+
+head(SparkR::sql("SELECT bins, `Violation Code`, count(*) as `count`
+                    FROM time_violation_data where bins = '16:00-19:59'
+                    group by bins, `Violation Code`
+                    order by `count` desc limit 3"))
+
+head(SparkR::sql("SELECT bins, `Violation Code`, count(*) as `count`
+                    FROM time_violation_data where bins = '20:00-23:59'
+                    group by bins, `Violation Code`
+                    order by `count` desc limit 3"))
+
+
+##            bins  Violation Code   count
+##  1  00:00-03:59              21   73160
+##  2  00:00-03:59              40   45960
+##  3  00:00-03:59              14   29312
+
+##            bins  Violation Code   count
+##  1  04:00-07:59              14  141276
+##  2  04:00-07:59              21  119469
+##  3  04:00-07:59              40  112186
+
+##            bins  Violation Code   count
+##  1  08:00-11:59              21 1182689
+##  2  08:00-11:59              36  751422
+##  3  08:00-11:59              38  346518
+
+
+##            bins  Violation Code   count
+##  1  12:00-15:59              36  588395
+##  2  12:00-15:59              38  462859
+##  3  12:00-15:59              37  337096
+
+##            bins  Violation Code   count                                             
+##  1  16:00-19:59              38  203232
+##  2  16:00-19:59              37  145784
+##  3  16:00-19:59              14  144749
+
+##            bins  Violation Code   count                                              
+##  1  20:00-23:59               7   65593
+##  2  20:00-23:59              38   47032
+##  3  20:00-23:59              14   44787
+
+
+# Now, try another direction. For the 3 most commonly occurring violation codes, 
+# find the most common times of day (in terms of the bins from the previous part)
+
+# Finding the 3 most commonly occurring violation codes
+head(SparkR::sql("SELECT `Violation Code`, count(*) as `count`
+                    FROM time_violation_data
+                    group by `Violation Code`
+                    order by `count` desc limit 3"))
+
+##   Violation Code   count
+## 1             21 1528588
+## 2             36 1400614
+## 3             38 1062304
+
+# Violation codes: 21, 36, 38
+
+head(SparkR::sql("SELECT `Violation Code`, bins, count(*) as `count`
+                    FROM time_violation_data where `Violation Code` = '21'
+                    group by `Violation Code`, bins
+                    order by `count` desc limit 1"))
+
+head(SparkR::sql("SELECT `Violation Code`, bins, count(*) as `count`
+                    FROM time_violation_data where `Violation Code` = '36'
+                    group by `Violation Code`, bins
+                    order by `count` desc limit 1"))
+
+head(SparkR::sql("SELECT `Violation Code`, bins, count(*) as `count`
+                    FROM time_violation_data where `Violation Code` = '38'
+                    group by `Violation Code`, bins
+                    order by `count` desc limit 1"))
+
+##   Violation Code        bins   count
+## 1             21 08:00-11:59 1182689
+## 2             36 08:00-11:59  751422
+## 3             38 12:00-15:59  462859
+
+# For code 21, maximum tickets occur during the time - 08:00 AM to 12:00 PM
+# For code 36, maximum tickets occur during the time - 08:00 AM to 12:00 PM
+# For code 38, maximum tickets occur during the time - 12:00 PM to 04:00 PM
+
+
+## 6. Seasonality
+
+## This can be done in different ways
+## Seasonality can be defined month-wise, or season-wise (3 months)
+## We have performed based on the seasons - Summer, Winter, Spring and Autumn
+
+tickets_seasonality <-SparkR::sql("select `Violation Code`, `Issue Date`, case
+                                  when month(to_date(`Issue Date`, 'MM/dd/yyyy')) between 03 and 05
+                                  then 'spring'
+                                  when month(to_date(`Issue Date`, 'MM/dd/yyyy')) between 06 and 08
+                                  then 'summer'
+                                  when month(to_date(`Issue Date`, 'MM/dd/yyyy')) between 09 and 11
+                                  then 'autumn'
+                                  when month(to_date(`Issue Date`, 'MM/dd/yyyy')) in (1,2,12)
+                                  then 'winter'
+                                  else 'unknown'
+                                  end as season
+                                  from data_2017")
+
+head(tickets_seasonality)
+
+##   Violation Code Issue Date season
+## 1              7 2016-07-10 summer
+## 2              7 2016-07-08 summer
+## 3              5 2016-08-23 summer
+## 4             47 2017-06-14 summer
+## 5             69 2016-11-21 autumn
+## 6              7 2017-06-13 summer
+
+
+# For using SQL, you need to create a temporary view
+createOrReplaceTempView(tickets_seasonality, 'seasonal_data')
+
+# Frequency of tickets for each season
+
+head(SparkR::sql("select `season`, count(*) as no_of_tickets
+                    from seasonal_data
+                    group by `season`
+                    order by no_of_tickets desc"))
+
+##   season   no_of_tickets                                                          
+## 1 spring         2880687
+## 2 autumn         2830802
+## 3 summer         2606208
+## 4 winter         2485331
+
+
+# The 3 most common violations for each season
+
+head(SparkR::sql("select `season`, `Violation Code`, count(*) as no_of_tickets
+                    from seasonal_data where `season` = 'spring' 
+                    group by season, `Violation Code` order by no_of_tickets desc
+                    limit 3"))
+
+head(SparkR::sql("select `season`, `Violation Code`, count(*) as no_of_tickets
+                    from seasonal_data where `season` = 'autumn' 
+                    group by season, `Violation Code` order by no_of_tickets desc
+                    limit 3"))
+
+head(SparkR::sql("select `season`, `Violation Code`, count(*) as no_of_tickets
+                    from seasonal_data where `season` = 'summer' 
+                    group by season, `Violation Code` order by no_of_tickets desc
+                    limit 3"))
+
+head(SparkR::sql("select `season`, `Violation Code`, count(*) as no_of_tickets
+                    from seasonal_data where `season` = 'winter' 
+                    group by season, `Violation Code` order by no_of_tickets desc
+                    limit 3"))
+
+##    season Violation Code no_of_tickets
+## 1  spring             21        402807
+## 2  spring             36        344834
+## 3  spring             38        271192
+
+##    season Violation Code no_of_tickets
+## 1  autumn             36        456046
+## 2  autumn             21        357479
+## 3  autumn             38        283828
+
+
+##    season Violation Code no_of_tickets                                           
+## 1  summer             21        405961
+## 2  summer             38        247561
+## 3  summer             36        240396
+
+##    season Violation Code no_of_tickets                                           
+## 1  winter             21        362341
+## 2  winter             36        359338
+## 3  winter             38        259723
+
+# The fines collected from all the parking violation constitute a revenue source
+# for the NYC police department. Let’s take an example of estimating that
+# for the 3 most commonly occurring codes.
+
+## Three most occuring violation codes : 21, 36, 38
+
+## Total occurrences of the 3 most common violation codes
+head(SparkR::sql("select `Violation Code`, count(*) as `no_of_tickets`
+                    from data_2017
+                    group by `Violation Code`
+                    order by `no_of_tickets` desc
+                    limit 3"))
+
+##   Violation Code no_of_tickets                                                  
+## 1             21       1528588
+## 2             38       1400614
+## 3             14       1062304
+
+## Fine amount for each code can be checked from the website
+## http://www1.nyc.gov/site/finance/vehicles/services-violation-codes.page
+
+## 21	
+## Street Cleaning: No parking where parking is not allowed by sign, 
+## street marking or traffic control device
+## Fine amount - average - $55
+
+## 36
+## Exceeding the posted speed limit in or near a designated school zone.
+## Fine amount - average - $50
+
+## 38
+## Parking Meter - Failing to show a receipt or tag in the windshield.
+## Drivers get a 5-minute grace period past the expired time on parking meter receipts.
+## Fine amount - average - $50
+
+# For using SQL, you need to create a temporary view
+
+head(SparkR::sql("select `Violation Code`, case
+                    when `Violation Code` = 21
+                    then 55 * count(*)
+                    when `Violation Code` = 36
+                    then 50* count(*)
+                    when `Violation Code` = 38
+                    then 50* count(*)
+                    else '0'
+                    end as `fine_amount`
+                    from data_2017
+                    group by `Violation Code`
+                    order by `fine_amount` desc
+                    limit 3"))
+
+## Violation Code fine_amount                                                    
+## 1             21    84072340
+## 2             36    70030700
+## 3             38    53115200
+
+# What can you intuitively infer from these findings?
+
+sparkR.stop()
